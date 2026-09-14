@@ -1,0 +1,35 @@
+services:
+  api:
+    build: .
+    environment:
+      APP_DB: /data/app.db
+    volumes:
+      - app-data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  # One-shot: runs the test suite, then asks the api to analyze the club's
+  # full episode so the club can confirm the whole program is licensed.
+  verify:
+    build: .
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_URL: http://api:8000
+    command: ["sh", "-c", "python -m pytest && python scripts/verify.py"]
+
+volumes:
+  app-data:
