@@ -186,6 +186,42 @@ def test_field_validation_422_and_not_saved(client, node):
     assert client.get("/edits").json() == []
 
 
+@pytest.mark.parametrize(
+    "node",
+    [
+        # strings and floats must not be silently coerced to integer ticks
+        {"type": "source", "id": "v", "duration": "100"},
+        {"type": "source", "id": "v", "duration": 100.0},
+        {"type": "source", "id": "v", "duration": True},
+        {"type": "trim", "id": "v", "child": "a", "start": "0", "end": 5},
+        {"type": "trim", "id": "v", "child": "a", "start": 0, "end": 5.0},
+        {"type": "speed", "id": "v", "child": "a", "p": "2", "q": 1},
+        {"type": "speed", "id": "v", "child": "a", "p": 2, "q": 1.0},
+        {"type": "mix", "id": "v", "children": [{"node": "a", "offset": "3"}]},
+        {"type": "mix", "id": "v", "children": [{"node": "a", "offset": 1.5}]},
+    ],
+)
+def test_non_integer_ticks_rejected_not_coerced(client, node):
+    payload = {"nodes": [{"type": "source", "id": "a", "duration": 10}, node]}
+    response = client.post("/edits", json=payload)
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][0] == "body"
+    assert client.get("/edits").json() == []
+
+
+def test_non_integer_consent_ticks_rejected(client):
+    payload = {
+        "nodes": [{"type": "source", "id": "a", "duration": 10}],
+        "consents": [{"source": "a", "start": "0", "end": 5,
+                      "audiences": ["students"]}],
+    }
+    assert client.post("/edits", json=payload).status_code == 422
+    payload["consents"][0]["start"] = 0
+    payload["consents"][0]["end"] = 5.0
+    assert client.post("/edits", json=payload).status_code == 422
+    assert client.get("/edits").json() == []
+
+
 def test_analysis_unknown_output_422_and_not_saved(client):
     edit_id = client.post(
         "/edits", json={"nodes": [{"type": "source", "id": "a", "duration": 10}]}

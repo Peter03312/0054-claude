@@ -57,12 +57,14 @@ def test_nested_trim_speed_exact_fractions():
         {"start": 70, "end": 100},
     ]
     assert report["decision"] == "rejected"
-    assert report["violation"]["out"] == {"start": 90, "end": 190}
+    # the violation is pinpointed to the unlicensed output range, not the
+    # whole engine segment: output [90, 100) consumes s[0, 10)
+    assert report["violation"]["out"] == {"start": 90, "end": 100}
     assert report["violation"]["unlicensed"] == [
         {
             "source": "s",
             "contributors": ["amy"],
-            "uncovered": [{"start": 0, "end": 10}, {"start": 70, "end": 100}],
+            "uncovered": [{"start": 0, "end": 10}],
         }
     ]
 
@@ -135,9 +137,10 @@ def test_mix_overlap_splits_segments_at_boundaries():
     assert [s["source"] for s in solo["sources"]] == ["a"]
     assert [s["source"] for s in overlap["sources"]] == ["a", "b"]
     assert overlap["licensed"] is False
-    # b is shifted by 6: output [6, 10) consumes b[0, 4), consent covers [0, 2)
+    # b is shifted by 6: output [6, 10) consumes b[0, 4), consent covers [0, 2);
+    # the violation is pinpointed to output [8, 10) which consumes b[2, 4)
     assert report["decision"] == "rejected"
-    assert report["violation"]["out"] == {"start": 6, "end": 10}
+    assert report["violation"]["out"] == {"start": 8, "end": 10}
     assert report["violation"]["unlicensed"] == [
         {"source": "b", "contributors": ["bo"], "uncovered": [{"start": 2, "end": 4}]}
     ]
@@ -182,8 +185,11 @@ def test_same_source_mixed_twice_unions_used_intervals():
     # echo overlap: output [5, 10) consumes s[0, 5) and s[5, 10) -> union [0, 10)
     assert mid["sources"][0]["used"] == [{"start": 0, "end": 10}]
     assert mid["sources"][0]["uncovered"] == [{"start": 0, "end": 2}]
-    # earliest violating segment wins
-    assert report["violation"]["out"] == {"start": 0, "end": 5}
+    # earliest unlicensed output range: [0, 2) consumes s[0, 2)
+    assert report["violation"]["out"] == {"start": 0, "end": 2}
+    assert report["violation"]["unlicensed"][0]["uncovered"] == [
+        {"start": 0, "end": 2}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +293,83 @@ def test_violation_is_earliest_segment():
     )
     report = analyze(sub, "c", "students")
     assert report["decision"] == "rejected"
-    assert report["violation"]["out"] == {"start": 0, "end": 10}
+    # first segment wins, trimmed to the exact unlicensed range [0, 2)
+    assert report["violation"]["out"] == {"start": 0, "end": 2}
     assert report["violation"]["unlicensed"][0]["uncovered"] == [
-        {"start": 0, "end": 2},
-        {"start": 8, "end": 10},
+        {"start": 0, "end": 2}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Precise violation pinpointing
+# ---------------------------------------------------------------------------
+
+def test_violation_excludes_licensed_beginning():
+    """The reported violating segment starts at the first unlicensed output
+    tick, not at the start of the enclosing engine segment."""
+    sub = make_edit(
+        nodes=[{"type": "source", "id": "s", "duration": 100,
+                "contributors": ["amy"]}],
+        consents=[consent("s", 0, 70)],
+    )
+    report = analyze(sub, "s", "students")
+    assert report["decision"] == "rejected"
+    # output [0, 70) is licensed; only [70, 100) needs to be cut
+    assert report["violation"]["out"] == {"start": 70, "end": 100}
+    assert report["violation"]["unlicensed"] == [
+        {"source": "s", "contributors": ["amy"],
+         "uncovered": [{"start": 70, "end": 100}]}
+    ]
+
+
+def test_violation_pinpoints_earliest_hole():
+    sub = make_edit(
+        nodes=[{"type": "source", "id": "s", "duration": 100,
+                "contributors": ["amy"]}],
+        consents=[consent("s", 0, 10), consent("s", 70, 100)],
+    )
+    report = analyze(sub, "s", "students")
+    assert report["violation"]["out"] == {"start": 10, "end": 70}
+    assert report["violation"]["unlicensed"][0]["uncovered"] == [
+        {"start": 10, "end": 70}
+    ]
+
+
+def test_violation_back_maps_through_speed_and_trim():
+    # trim [10, 90) of s, then 2x speed: output [0, 40) consumes s[10, 90)
+    sub = make_edit(
+        nodes=[
+            {"type": "source", "id": "s", "duration": 100,
+             "contributors": ["amy"]},
+            {"type": "trim", "id": "t", "child": "s", "start": 10, "end": 90},
+            {"type": "speed", "id": "v", "child": "t", "p": 2, "q": 1},
+        ],
+        consents=[consent("s", 10, 50)],
+    )
+    report = analyze(sub, "v", "students")
+    # unlicensed input [50, 90) -> output [(50-10)/2, (90-10)/2) = [20, 40)
+    assert report["violation"]["out"] == {"start": 20, "end": 40}
+    assert report["violation"]["unlicensed"][0]["uncovered"] == [
+        {"start": 50, "end": 90}
+    ]
+
+
+def test_violation_lists_only_sources_unlicensed_in_reported_range():
+    sub = make_edit(
+        nodes=[
+            {"type": "source", "id": "a", "duration": 10, "contributors": ["amy"]},
+            {"type": "source", "id": "b", "duration": 10, "contributors": ["bo"]},
+            {"type": "mix", "id": "m", "children": [{"node": "a"}, {"node": "b"}]},
+        ],
+        consents=[consent("a", 2, 10), consent("b", 0, 5)],
+    )
+    report = analyze(sub, "m", "students")
+    # a unlicensed at output [0, 2); b unlicensed at output [5, 10).
+    # The earliest unlicensed range is [0, 2); only a belongs to it.
+    assert report["violation"]["out"] == {"start": 0, "end": 2}
+    assert [u["source"] for u in report["violation"]["unlicensed"]] == ["a"]
+    assert report["violation"]["unlicensed"][0]["uncovered"] == [
+        {"start": 0, "end": 2}
     ]
 
 

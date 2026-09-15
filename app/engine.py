@@ -294,6 +294,17 @@ def subtract_intervals(used, permitted) -> list[tuple[Fraction, Fraction]]:
     return uncovered
 
 
+def intersect_intervals(left, right) -> list[tuple[Fraction, Fraction]]:
+    """Intersection of two normalized interval lists (normalized output)."""
+    out: list[tuple[Fraction, Fraction]] = []
+    for s, e in left:
+        for ps, pe in right:
+            lo, hi = max(s, ps), min(e, pe)
+            if lo < hi:
+                out.append((lo, hi))
+    return union_intervals(out)
+
+
 def _permitted_intervals(consents, audience: str):
     """Union of consent segments per source, for the target audience only."""
     per_source: dict[str, list] = {}
@@ -349,6 +360,61 @@ def validate_submission(sub) -> dict[str, Fraction]:
     return {nid: graph.durations[nid] for nid in graph.index}
 
 
+def _pinpoint_violation(
+    item: dict, uncovered_by_source: dict, contributors: dict
+) -> dict:
+    """Trim a violating segment to its exact unlicensed output range.
+
+    Each uncovered source interval is mapped back through the source's affine
+    maps to output time (t = (input - offset) / ratio). The earliest maximal
+    unlicensed output interval is reported, so already-licensed program at
+    the segment's start is never flagged; inside it, every unlicensed source
+    is listed with the original intervals consumed there, sorted by source id.
+    """
+    output_ranges: list[tuple[Fraction, Fraction]] = []
+    for sid, uncovered in uncovered_by_source.items():
+        if not uncovered:
+            continue
+        for mapping in item["mappings"][sid]:
+            in_lo = mapping.ratio * item["start"] + mapping.offset
+            in_hi = mapping.ratio * item["end"] + mapping.offset
+            for us, ue in uncovered:
+                lo, hi = max(us, in_lo), min(ue, in_hi)
+                if lo < hi:
+                    output_ranges.append(
+                        (
+                            (lo - mapping.offset) / mapping.ratio,
+                            (hi - mapping.offset) / mapping.ratio,
+                        )
+                    )
+    v_start, v_end = union_intervals(output_ranges)[0]
+
+    unlicensed: list[dict] = []
+    for sid in sorted(uncovered_by_source):
+        uncovered = uncovered_by_source[sid]
+        if not uncovered:
+            continue
+        consumed = union_intervals(
+            (m.ratio * v_start + m.offset, m.ratio * v_end + m.offset)
+            for m in item["mappings"][sid]
+        )
+        precise = intersect_intervals(consumed, uncovered)
+        if precise:
+            unlicensed.append(
+                {
+                    "source": sid,
+                    "contributors": contributors.get(sid, []),
+                    "uncovered": [
+                        {"start": rat_json(a), "end": rat_json(b)} for a, b in precise
+                    ],
+                }
+            )
+    return {
+        "out": {"start": rat_json(v_start), "end": rat_json(v_end)},
+        "unlicensed": unlicensed,
+    }
+
+
 def analyze(sub, output_id: str, audience: str) -> dict:
     """Backtrack the output node's timeline to original source intervals and
     check them against the consent union for the target audience."""
@@ -394,9 +460,10 @@ def analyze(sub, output_id: str, audience: str) -> dict:
     for item in merged:
         used = _used_intervals(item["mappings"], item["start"], item["end"])
         sources_out: list[dict] = []
-        unlicensed: list[dict] = []
+        uncovered_by_source: dict[str, list] = {}
         for sid in sorted(item["mappings"]):
             uncovered = subtract_intervals(used[sid], permitted.get(sid, []))
+            uncovered_by_source[sid] = uncovered
             sources_out.append(
                 {
                     "source": sid,
@@ -413,24 +480,13 @@ def analyze(sub, output_id: str, audience: str) -> dict:
                     ],
                 }
             )
-            if uncovered:
-                unlicensed.append(
-                    {
-                        "source": sid,
-                        "contributors": contributors.get(sid, []),
-                        "uncovered": [
-                            {"start": rat_json(a), "end": rat_json(b)}
-                            for a, b in uncovered
-                        ],
-                    }
-                )
         out_span = {"start": rat_json(item["start"]), "end": rat_json(item["end"])}
         segments_out.append(
             {"out": out_span, "licensed": item["licensed"], "sources": sources_out}
         )
-        if unlicensed and violation is None:
-            # Earliest-starting violating segment; sources sorted by source id.
-            violation = {"out": out_span, "unlicensed": unlicensed}
+        if violation is None and any(uncovered_by_source.values()):
+            # Earliest violating segment, pinpointed to its unlicensed range.
+            violation = _pinpoint_violation(item, uncovered_by_source, contributors)
 
     return {
         "output": output_id,

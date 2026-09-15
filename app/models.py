@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, NonNegativeInt, PositiveInt, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
+
+# Tick fields are strict integers: JSON strings ("100"), floats (3.0, 1.5)
+# and booleans are rejected with a 422 instead of being silently coerced.
+Tick = Annotated[StrictInt, Field(ge=0)]
+PositiveTick = Annotated[StrictInt, Field(gt=0)]
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +26,7 @@ class SourceNode(BaseModel):
 
     type: Literal["source"]
     id: str = Field(min_length=1)
-    duration: PositiveInt
+    duration: PositiveTick
     contributors: list[str] = Field(default_factory=list)
 
 
@@ -31,8 +36,8 @@ class TrimNode(BaseModel):
     type: Literal["trim"]
     id: str = Field(min_length=1)
     child: str = Field(min_length=1)
-    start: NonNegativeInt
-    end: NonNegativeInt
+    start: Tick
+    end: Tick
 
     @model_validator(mode="after")
     def _non_empty_half_open(self):
@@ -47,8 +52,8 @@ class SpeedNode(BaseModel):
     type: Literal["speed"]
     id: str = Field(min_length=1)
     child: str = Field(min_length=1)
-    p: PositiveInt
-    q: PositiveInt
+    p: PositiveTick
+    q: PositiveTick
 
 
 class ConcatNode(BaseModel):
@@ -61,7 +66,7 @@ class ConcatNode(BaseModel):
 
 class MixChild(BaseModel):
     node: str = Field(min_length=1)
-    offset: NonNegativeInt = 0
+    offset: Tick = 0
 
 
 class MixNode(BaseModel):
@@ -82,8 +87,8 @@ class ConsentEntry(BaseModel):
     """One half-open licensed range of one source, for the named audiences."""
 
     source: str = Field(min_length=1)
-    start: NonNegativeInt
-    end: NonNegativeInt
+    start: Tick
+    end: Tick
     audiences: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
